@@ -1,0 +1,10 @@
+chmod +x universal_update_checker.sh
+
+./universal_update_checker.sh          # All updates
+./universal_update_checker.sh --sec    # Only security updates
+./universal_update_checker.sh --non-sec # Only non-security updates
+
+
+./list_updates.sh --security
+./list_updates.sh --non-security
+./list_updates.sh --all
