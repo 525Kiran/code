@@ -1,0 +1,8 @@
+# List all available updates
+yum updateinfo list available | awk '{print $3}' | sort -u > /tmp/all_pkgs.txt
+
+# List only security updates
+yum updateinfo list security all | awk '{print $3}' | sort -u > /tmp/sec_pkgs.txt
+
+# Find non-security updates
+comm -23 /tmp/all_pkgs.txt /tmp/sec_pkgs.txt
