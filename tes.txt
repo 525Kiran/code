@@ -1,0 +1,54 @@
+Why you still see updates with yum update
+
+SSM patching doesn’t always equal yum update
+
+SSM uses the updateinfo.xml metadata from repos to decide what’s eligible.
+
+If a package update in Amazon Linux 2 repos isn’t properly tagged (or missing in updateinfo), SSM will simply ignore it, even if it’s a valid update.
+
+👉 So yum update (raw package manager) may show more updates than SSM applies.
+
+Amazon Linux 2 tagging inconsistency
+
+Unlike RHEL, Amazon Linux 2 often has updates that are:
+
+Released in repos ✔️
+
+But not included in updateinfo.xml ❌
+
+SSM Patch Manager only works with what’s in updateinfo.
+
+Example: tzdata, ca-certificates, amazon-efs-utils often miss metadata.
+
+Timing
+
+AWS sometimes releases the package first, then publishes the patch metadata with a lag (hours or days).
+
+If you patched during that gap → baseline skips it.
+
+Baseline scope
+
+Your baseline is wide open (all severities, non-sec included).
+
+So logically it would patch everything — if metadata exists.
+
+The only reason patches remain is: they’re not described in updateinfo metadata, so SSM never “sees” them.
+
+🔹 How to confirm
+
+Run this on your EC2:
+
+# Shows which updates have metadata (security/non-security)
+yum updateinfo list all
+
+# Shows available package updates from repos (what yum sees)
+yum list updates
+
+
+If something shows in yum list updates but not in yum updateinfo list all →
+that’s why Patch Manager skipped it.
+
+✅ Bottom line:
+Your baseline is correctly configured to apply both security + non-security patches.
+The reason some updates are still left behind after patching is because Amazon didn’t include metadata for those packages in updateinfo, so Patch Manager ignores them.
+That’s why you always see a mismatch between yum update vs Patch Baseline on Amazon Linux 2.
