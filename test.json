@@ -1,0 +1,319 @@
+{
+  "schemaVersion": "0.3",
+  "description": "Automation document to auto-discover an instance in an ASG (via tags), patch it, create a new AMI, update Launch Template, and refresh the ASG.",
+  "assumeRole": "${ssm_automation_role_arn}",
+  "parameters": {
+    "TagKey": {
+      "type": "String",
+      "description": "Tag key used to identify patchable instances",
+      "default": "Patch Group"
+    },
+    "TagValue": {
+      "type": "String",
+      "description": "Tag value used to identify patchable instances",
+      "default": "ASG-Patchable"
+    }
+  },
+  "mainSteps": [
+    {
+      "name": "FindInstances",
+      "action": "aws:executeAwsApi",
+      "onFailure": "step:exit",
+      "inputs": {
+        "Service": "ec2",
+        "Api": "DescribeInstances",
+        "Filters": [
+          { "Name": "tag:{{ TagKey }}", "Values": ["{{ TagValue }}"] },
+          { "Name": "instance-state-name", "Values": ["running"] }
+        ]
+      },
+      "outputs": [
+        {
+          "Name": "InstanceId",
+          "Selector": "$.Reservations[0].Instances[0].InstanceId",
+          "Type": "String"
+        }
+      ],
+      "nextStep": "GetASGName"
+    },
+    {
+      "name": "GetASGName",
+      "action": "aws:executeAwsApi",
+      "onFailure": "step:exit",
+      "inputs": {
+        "Service": "autoscaling",
+        "Api": "DescribeAutoScalingInstances",
+        "InstanceIds": ["{{ FindInstances.InstanceId }}"]
+      },
+      "outputs": [
+        {
+          "Name": "ASGName",
+          "Selector": "$.AutoScalingInstances[0].AutoScalingGroupName",
+          "Type": "String"
+        }
+      ],
+      "isCritical": "true",
+      "nextStep": "DetectOS"
+    },
+    {
+      "name": "DetectOS",
+      "action": "aws:executeAwsApi",
+      "onFailure": "step:exit",
+      "inputs": {
+        "Service": "ssm",
+        "Api": "DescribeInstanceInformation",
+        "Filters": [
+          { "Key": "InstanceIds", "Values": ["{{ FindInstances.InstanceId }}"] }
+        ]
+      },
+      "outputs": [
+        {
+          "Name": "OSFamily",
+          "Selector": "$.InstanceInformationList[0].PlatformType",
+          "Type": "String"
+        }
+      ],
+      "nextStep": "CreatePrePatchedAMI"
+    },
+    {
+      "name": "CreatePrePatchedAMI",
+      "action": "aws:createImage",
+      "onFailure": "step:exit",
+      "inputs": {
+        "InstanceId": "{{ FindInstances.InstanceId }}",
+        "ImageName": "BeforePatched-{{ GetASGName.ASGName }}-{{ global:DATE_TIME }}",
+        "ImageDescription": "Pre Patched AMI on {{ global:DATE_TIME }}",
+        "NoReboot": false
+      },
+      "isCritical": "true",
+      "nextStep": "WaitForPrePatchedAMIToBeAvailable"
+    },
+    {
+      "name": "WaitForPrePatchedAMIToBeAvailable",
+      "action": "aws:waitForAwsResourceProperty",
+      "onFailure": "step:exit",
+      "inputs": {
+        "Service": "ec2",
+        "Api": "DescribeImages",
+        "ImageIds": ["{{ CreatePrePatchedAMI.ImageId }}"],
+        "PropertySelector": "$.Images[0].State",
+        "DesiredValues": ["available"]
+      },
+      "isCritical": "true",
+        "nextStep": "SuspendASGProcesses"
+    },
+    {
+      "name": "SuspendASGProcesses",
+      "action": "aws:executeAwsApi",
+      "onFailure": "step:exit",
+      "inputs": {
+        "Service": "autoscaling",
+        "Api": "SuspendProcesses",
+        "AutoScalingGroupName": "{{ GetASGName.ASGName }}",
+        "ScalingProcesses": ["HealthCheck", "ReplaceUnhealthy", "AZRebalance", "AlarmNotification", "ScheduledActions", "AddToLoadBalancer", "Terminate"]
+      },
+      "isCritical": "true",
+      "nextStep": "RunPatchBaseline"
+    },
+    {
+      "name": "RunPatchBaseline",
+      "action": "aws:runCommand",
+      "onFailure": "step:ResumeProcessesonFailure",
+      "timeoutSeconds": 3600,
+      "inputs": {
+        "DocumentName": "AWS-RunPatchBaseline",
+        "InstanceIds": ["{{ FindInstances.InstanceId }}"],
+        "Parameters": {
+          "Operation": "Install",
+          "RebootOption": "RebootIfNeeded"
+        },
+        "OutputS3BucketName": "${ssm_output_bucket_name}",
+        "OutputS3KeyPrefix": "ssm-automation-output/{{ global:DATE }}/{{ FindInstances.InstanceId }}"
+      },
+      "isCritical": "true",
+      "nextStep": "CheckInstanceHealth"
+    },
+    {
+      "name": "CheckInstanceHealth",
+      "action": "aws:waitForAwsResourceProperty",
+      "onFailure": "step:ResumeProcessesonFailure",
+      "inputs": {
+        "Service": "ec2",
+        "Api": "DescribeInstanceStatus",
+        "InstanceIds": ["{{ FindInstances.InstanceId }}"],
+        "IncludeAllInstances": true,
+        "PropertySelector": "$.InstanceStatuses[0].InstanceStatus.Status",
+        "DesiredValues": ["ok"]
+      },
+      "isCritical": "true",
+      "nextStep": "BranchOnOS"
+    },
+    {
+      "name": "BranchOnOS",
+      "action": "aws:branch",
+      "inputs": {
+        "Choices": [
+          {
+            "NextStep": "RemoveOldKernels",
+            "Variable": "{{ DetectOS.OSFamily }}",
+            "StringEquals": "Linux"
+          },
+          {
+            "NextStep": "ResumeASGProcesses",
+            "Variable": "{{ DetectOS.OSFamily }}",
+            "StringEquals": "Windows"
+          }
+        ],
+        "Default" : "RemoveOldKernels"
+      }
+    },
+    {
+      "name": "RemoveOldKernels",
+      "action": "aws:runCommand",
+      "onFailure": "step:ResumeProcessesonFailure",
+      "inputs": {
+        "DocumentName": "AWS-RunShellScript",
+        "InstanceIds": ["{{ FindInstances.InstanceId }}"],
+        "Parameters": {
+          "commands": [
+            "if command -v dnf >/dev/null 2>&1; then dnf remove -y $(dnf repoquery --installonly --latest-limit=-1 -q);",
+            "elif command -v yum >/dev/null 2>&1; then yum install -y yum-utils || true; package-cleanup --oldkernels --count=1 -y;",
+            "else echo 'No yum/dnf found, skipping kernel cleanup'; fi"
+          ]
+        }
+      },
+      "nextStep": "ResumeASGProcesses"
+    },
+    {
+      "name": "ResumeASGProcesses",
+      "action": "aws:executeAwsApi",
+      "onFailure": "step:exit",
+      "inputs": {
+        "Service": "autoscaling",
+        "Api": "ResumeProcesses",
+        "AutoScalingGroupName": "{{ GetASGName.ASGName }}",
+        "ScalingProcesses": ["HealthCheck", "ReplaceUnhealthy", "AZRebalance", "AlarmNotification", "ScheduledActions", "AddToLoadBalancer", "Terminate"]
+      },
+      "isCritical": "true",
+      "nextStep": "CreatePostPatchedAMI"
+    },
+    {
+      "name": "CreatePostPatchedAMI",
+      "action": "aws:createImage",
+      "onFailure": "step:exit",
+      "inputs": {
+        "InstanceId": "{{ FindInstances.InstanceId }}",
+        "ImageName": "AfterPatched-{{ GetASGName.ASGName }}-{{ global:DATE_TIME }}",
+        "ImageDescription": "Patched AMI created from {{ FindInstances.InstanceId }} on {{ global:DATE_TIME }}",
+        "NoReboot": false
+      },
+      "isCritical": "true",
+      "nextStep": "WaitForPostPatchedAMIToBeAvailable"
+    },
+    {
+      "name": "WaitForPostPatchedAMIToBeAvailable",
+      "action": "aws:waitForAwsResourceProperty",
+      "onFailure": "step:exit",
+      "inputs": {
+        "Service": "ec2",
+        "Api": "DescribeImages",
+        "ImageIds": ["{{ CreatePostPatchedAMI.ImageId }}"],
+        "PropertySelector": "$.Images[0].State",
+        "DesiredValues": ["available"]
+      },
+      "isCritical": "true",
+      "nextStep": "GetLaunchTemplate"
+    },
+    {
+      "name": "GetLaunchTemplate",
+      "action": "aws:executeAwsApi",
+      "onFailure": "step:exit",
+      "inputs": {
+        "Service": "autoscaling",
+        "Api": "DescribeAutoScalingGroups",
+        "AutoScalingGroupNames": ["{{ GetASGName.ASGName }}"]
+      },
+      "outputs": [
+        {
+          "Name": "LaunchTemplateId",
+          "Selector": "$.AutoScalingGroups[0].LaunchTemplate.LaunchTemplateId",
+          "Type": "String"
+        }
+      ],
+      "isCritical": "true",
+      "nextStep": "CreateNewLaunchTemplateVersion"
+    },
+    {
+      "name": "CreateNewLaunchTemplateVersion",
+      "action": "aws:executeAwsApi",
+      "onFailure": "step:exit",
+      "inputs": {
+        "Service": "ec2",
+        "Api": "CreateLaunchTemplateVersion",
+        "LaunchTemplateId": "{{ GetLaunchTemplate.LaunchTemplateId }}",
+        "SourceVersion": "$Latest",
+        "LaunchTemplateData": {
+          "ImageId": "{{ CreatePostPatchedAMI.ImageId }}"
+        }
+      },
+      "outputs": [
+        {
+          "Name": "NewVersionNumber",
+          "Selector": "$.LaunchTemplateVersion.VersionNumber",
+          "Type": "String"
+        }
+      ],
+      "isCritical": "true",
+      "nextStep": "SetDefaultLaunchTemplateVersion"
+    },
+    {
+      "name": "SetDefaultLaunchTemplateVersion",
+      "action": "aws:executeAwsApi",
+      "onFailure": "step:exit",
+      "inputs": {
+        "Service": "ec2",
+        "Api": "ModifyLaunchTemplate",
+        "LaunchTemplateId": "{{ GetLaunchTemplate.LaunchTemplateId }}",
+        "DefaultVersion": "{{ CreateNewLaunchTemplateVersion.NewVersionNumber }}"
+      },
+      "isCritical": "true",
+      "nextStep": "StartInstanceRefresh"
+    },
+    {
+      "name": "StartInstanceRefresh",
+      "action": "aws:executeAwsApi",
+      "onFailure": "step:exit",
+      "inputs": {
+        "Service": "autoscaling",
+        "Api": "StartInstanceRefresh",
+        "AutoScalingGroupName": "{{ GetASGName.ASGName }}",
+        "Strategy": "Rolling",
+        "Preferences": {
+          "MinHealthyPercentage": 90,
+          "InstanceWarmup": 120,
+          "SkipMatching": false
+        }
+      },
+      "isCritical": "true",
+      "nextStep": "exit"
+    },
+    {
+      "name": "ResumeProcessesonFailure",
+      "action": "aws:executeAwsApi",
+      "onFailure": "step:exit",
+      "inputs": {
+        "Service": "autoscaling",
+        "Api": "ResumeProcesses",
+        "AutoScalingGroupName": "{{ GetASGName.ASGName }}",
+        "ScalingProcesses": ["HealthCheck", "ReplaceUnhealthy", "AZRebalance", "AlarmNotification", "ScheduledActions", "AddToLoadBalancer", "Terminate"]
+      },
+      "nextStep": "exit"
+    },
+    {
+      "name": "exit",
+      "action": "aws:sleep",
+      "isEnd": true,
+      "inputs": { "Duration": "PT1S" }
+    }
+  ]
+}
