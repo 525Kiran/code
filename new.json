@@ -56,10 +56,10 @@
         }
       ],
       "isCritical": "true",
-      "nextStep": "RecordHealthyTargetsBefore"
+      "nextStep": "GetLoadBalancerTargetGroups"
     },
     {
-      "name": "RecordHealthyTargetsBefore",
+      "name": "GetLoadBalancerTargetGroups",
       "action": "aws:executeAwsApi",
       "onFailure": "step:exit",
       "inputs": {
@@ -83,7 +83,7 @@
       "inputs": {
         "Service": "elbv2",
         "Api": "DescribeTargetHealth",
-        "TargetGroupArn": "{{ RecordHealthyTargetsBefore.TargetGroupArns }}"
+        "TargetGroupArn": "{{ GetLoadBalancerTargetGroups.TargetGroupArns }}"
       },
       "outputs": [
         {
@@ -142,11 +142,23 @@
       "inputs": {
         "DocumentName": "AWS-RunPatchBaseline",
         "InstanceIds": ["{{ FindInstances.InstanceId }}"],
+        "NotificationConfig": {
+          "NotificationArn": "{{ SNSTopicArn }}",
+          "NotificationEvents": ["All"],
+          "NotificationType": "Command"
+        },
         "Parameters": {
           "Operation": "Install",
           "RebootOption": "RebootIfNeeded"
         }
       },
+      "outputs": [
+        {
+          "Name": "PatchCommandId",
+          "Selector": "$.CommandId",
+          "Type": "String"
+        }
+      ],
       "isCritical": "true",
       "nextStep": "CheckInstanceHealth"
     },
@@ -185,7 +197,7 @@
     {
       "name": "ResumeASGProcesses",
       "action": "aws:executeAwsApi",
-      "onFailure": "step:SendFailureSNS",
+  "onFailure": "step:GetAutomationExecutionDetails",
       "inputs": {
         "Service": "autoscaling",
         "Api": "ResumeProcesses",
@@ -198,7 +210,7 @@
     {
       "name": "CreatePostPatchedAMI",
       "action": "aws:createImage",
-      "onFailure": "step:SendFailureSNS",
+  "onFailure": "step:GetAutomationExecutionDetails",
       "inputs": {
         "InstanceId": "{{ FindInstances.InstanceId }}",
         "ImageName": "AfterPatched-{{ GetASGName.ASGName }}-{{ global:DATE_TIME }}",
@@ -211,7 +223,7 @@
     {
       "name": "WaitForPostPatchedAMIToBeAvailable",
       "action": "aws:waitForAwsResourceProperty",
-      "onFailure": "step:SendFailureSNS",
+  "onFailure": "step:GetAutomationExecutionDetails",
       "inputs": {
         "Service": "ec2",
         "Api": "DescribeImages",
@@ -225,7 +237,7 @@
     {
       "name": "GetLaunchTemplate",
       "action": "aws:executeAwsApi",
-      "onFailure": "step:SendFailureSNS",
+  "onFailure": "step:GetAutomationExecutionDetails",
       "inputs": {
         "Service": "autoscaling",
         "Api": "DescribeAutoScalingGroups",
@@ -244,7 +256,7 @@
     {
       "name": "GetDefaultLaunchTemplateVersion",
       "action": "aws:executeAwsApi",
-      "onFailure": "step:SendFailureSNS",
+  "onFailure": "step:GetAutomationExecutionDetails",
       "inputs": {
         "Service": "ec2",
         "Api": "DescribeLaunchTemplateVersions",
@@ -269,7 +281,7 @@
     {
       "name": "CreateNewLaunchTemplateVersion",
       "action": "aws:executeAwsApi",
-      "onFailure": "step:SendFailureSNS",
+      "onFailure": "step:GetAutomationExecutionDetails",
       "inputs": {
         "Service": "ec2",
         "Api": "CreateLaunchTemplateVersion",
@@ -292,7 +304,7 @@
     {
       "name": "SetDefaultLaunchTemplateVersion",
       "action": "aws:executeAwsApi",
-      "onFailure": "step:SendFailureSNS",
+      "onFailure": "step:GetAutomationExecutionDetails",
       "inputs": {
         "Service": "ec2",
         "Api": "ModifyLaunchTemplate",
@@ -305,7 +317,7 @@
     {
       "name": "StartInstanceRefresh",
       "action": "aws:executeAwsApi",
-      "onFailure": "step:SendFailureSNS",
+      "onFailure": "step:GetAutomationExecutionDetails",
       "inputs": {
         "Service": "autoscaling",
         "Api": "StartInstanceRefresh",
@@ -329,7 +341,7 @@
     },
     {
       "name": "WaitForInstanceRefreshToComplete",
-      "action": "aws:waitForAwsResourceProperty",
+      "action": "aws:executeAwsApi",
       "onFailure": "step:RollbackLaunchTemplate",
       "inputs": {
         "Service": "autoscaling",
@@ -337,9 +349,7 @@
         "PropertySelector": "$.InstanceRefreshes[0].Status",
         "DesiredValues": ["Successful"],
         "AutoScalingGroupName": "{{ GetASGName.ASGName }}",
-        "InstanceRefreshIds": ["{{ StartInstanceRefresh.InstanceRefreshId }}"],
-        "IntervalSeconds": 60,
-        "MaxAttempts": 60
+        "InstanceRefreshIds": ["{{ StartInstanceRefresh.InstanceRefreshId }}"]
       },
       "outputs": [
       {
@@ -358,7 +368,7 @@
       "inputs": {
         "Service": "elbv2",
         "Api": "DescribeTargetHealth",
-        "TargetGroupArn": "{{ RecordHealthyTargetsBefore.TargetGroupArns }}"
+        "TargetGroupArn": "{{ GetLoadBalancerTargetGroups.TargetGroupArns }}"
       },
       "outputs": [
         {
@@ -387,7 +397,7 @@
     {
       "name": "RollbackLaunchTemplate",
       "action": "aws:executeAwsApi",
-      "onFailure": "step:SendFailureSNS",
+      "onFailure": "step:GetAutomationExecutionDetails",
       "inputs": {
         "Service": "ec2",
         "Api": "ModifyLaunchTemplate",
@@ -399,7 +409,7 @@
     {
       "name": "StartRollbackInstanceRefresh",
       "action": "aws:executeAwsApi",
-      "onFailure": "step:SendFailureSNS",
+      "onFailure": "step:GetAutomationExecutionDetails",
       "inputs": {
         "Service": "autoscaling",
         "Api": "StartInstanceRefresh",
@@ -423,7 +433,7 @@
     {
       "name": "WaitforRollbackInstanceRefreshToComplete",
       "action": "aws:executeAwsApi",
-      "onFailure": "step:SendFailureSNS",
+      "onFailure": "step:GetAutomationExecutionDetails",
       "inputs": {
         "Service": "autoscaling",
         "Api": "DescribeInstanceRefreshes",
@@ -432,17 +442,54 @@
         "DesiredValues": ["Successful"],
         "InstanceRefreshIds": ["{{ StartRollbackInstanceRefresh.InstanceRefreshId }}"]
       },
+      "nextStep": "GetAutomationExecutionDetails"
+    },
+    {
+      "name": "GetAutomationExecutionDetails",
+      "action": "aws:executeAwsApi",
+      "onFailure": "step:SendFailureSNS",
+      "inputs": {
+        "Service": "ssm",
+        "Api": "GetAutomationExecution",
+        "AutomationExecutionId": "{{automation:EXECUTION_ID}}"
+      },
+      "outputs": [
+        {
+          "Name": "ExecutionId",
+          "Selector": "$.AutomationExecution.AutomationExecutionId",
+          "Type": "String"
+        },
+        {
+          "Name": "AutomationFailureMessage",
+          "Selector": "$.AutomationExecution.FailureMessage",
+          "Type": "String"
+        },
+        {
+          "Name": "CurrentStepName",
+          "Selector": "$.AutomationExecution.CurrentStepName",
+          "Type": "String"
+        },
+        {
+          "Name": "FailedStepNames",
+          "Selector": "$.AutomationExecution.StepExecutions[?(@.StepStatus=='Failed')].StepName",
+          "Type": "StringList"
+        },
+        {
+          "Name": "FailedStepMessages",
+          "Selector": "$.AutomationExecution.StepExecutions[?(@.StepStatus=='Failed')].FailureMessage",
+          "Type": "StringList"
+        }
+      ],
       "nextStep": "SendFailureSNS"
     },
     {
       "name": "SendFailureSNS",
       "action": "aws:executeAwsApi",
-      "onFailure": "step:exit",
       "inputs": {
         "Service": "sns",
         "Api": "Publish",
         "TopicArn": "{{ SNSTopicArn }}",
-        "Message": "❌ ASG Patch Automation Failed.\nASG-Name: {{ GetASGName.ASGName }}\nPlease Check the AWS Console > Systems Manager > Automation Executions for ExecutionId and full details.",
+        "Message": "❌ ASG Patch Automation Failed.\nASG-Name: {{ GetASGName.ASGName }}\nExecutionId: {{ GetAutomationExecutionDetails.ExecutionId }}\nCurrentStep: {{ GetAutomationExecutionDetails.CurrentStepName }}\nFailedSteps: {{ GetAutomationExecutionDetails.FailedStepNames }}\nFailureMessages: {{ GetAutomationExecutionDetails.FailedStepMessages }}\nAutomationFailureMessage: {{ GetAutomationExecutionDetails.AutomationFailureMessage }}",
         "Subject": "ASG Patch Failure"
       },
       "nextStep": "exit"
@@ -450,7 +497,6 @@
     {
       "name": "SendSuccessSNS",
       "action": "aws:executeAwsApi",
-      "onFailure": "step:SendFailureSNS",
       "inputs": {
         "Service": "sns",
         "Api": "Publish",
@@ -459,8 +505,7 @@
         "Subject": "ASG Patch Success"
       },
       "nextStep": "exit"
-    },
-    
+    },  
     {
       "name": "ResumeProcessesonFailure",
       "action": "aws:executeAwsApi",
@@ -471,7 +516,7 @@
         "AutoScalingGroupName": "{{ GetASGName.ASGName }}",
         "ScalingProcesses": ["HealthCheck", "ReplaceUnhealthy", "AZRebalance", "AlarmNotification", "ScheduledActions", "AddToLoadBalancer", "Terminate"]
       },
-      "nextStep": "SendFailureSNS"
+      "nextStep": "GetAutomationExecutionDetails"
     },
     {
       "name": "exit",
