@@ -142,11 +142,6 @@
       "inputs": {
         "DocumentName": "AWS-RunPatchBaseline",
         "InstanceIds": ["{{ FindInstances.InstanceId }}"],
-        "NotificationConfig": {
-          "NotificationArn": "{{ SNSTopicArn }}",
-          "NotificationEvents": ["All"],
-          "NotificationType": "Command"
-        },
         "Parameters": {
           "Operation": "Install",
           "RebootOption": "RebootIfNeeded"
@@ -341,15 +336,15 @@
     },
     {
       "name": "WaitForInstanceRefreshToComplete",
-      "action": "aws:executeAwsApi",
+      "action": "aws:waitForAwsResourceProperty",
       "onFailure": "step:RollbackLaunchTemplate",
       "inputs": {
         "Service": "autoscaling",
         "Api": "DescribeInstanceRefreshes",
-        "PropertySelector": "$.InstanceRefreshes[0].Status",
-        "DesiredValues": ["Successful"],
         "AutoScalingGroupName": "{{ GetASGName.ASGName }}",
-        "InstanceRefreshIds": ["{{ StartInstanceRefresh.InstanceRefreshId }}"]
+        "InstanceRefreshIds": ["{{ StartInstanceRefresh.InstanceRefreshId }}"],
+        "PropertySelector": "$.InstanceRefreshes[0].Status",
+        "DesiredValues": ["Successful"]
       },
       "outputs": [
       {
@@ -432,15 +427,15 @@
     },
     {
       "name": "WaitforRollbackInstanceRefreshToComplete",
-      "action": "aws:executeAwsApi",
+      "action": "aws:waitForAwsResourceProperty",
       "onFailure": "step:GetAutomationExecutionDetails",
       "inputs": {
         "Service": "autoscaling",
         "Api": "DescribeInstanceRefreshes",
         "AutoScalingGroupName": "{{ GetASGName.ASGName }}",
+        "InstanceRefreshIds": ["{{ StartRollbackInstanceRefresh.InstanceRefreshId }}"],
         "PropertySelector": "$.InstanceRefreshes[0].Status",
-        "DesiredValues": ["Successful"],
-        "InstanceRefreshIds": ["{{ StartRollbackInstanceRefresh.InstanceRefreshId }}"]
+        "DesiredValues": ["Successful"]
       },
       "nextStep": "GetAutomationExecutionDetails"
     },
@@ -489,7 +484,7 @@
         "Service": "sns",
         "Api": "Publish",
         "TopicArn": "{{ SNSTopicArn }}",
-        "Message": "❌ ASG Patch Automation Failed.\nASG-Name: {{ GetASGName.ASGName }}\nExecutionId: {{ GetAutomationExecutionDetails.ExecutionId }}\nCurrentStep: {{ GetAutomationExecutionDetails.CurrentStepName }}\nFailedSteps: {{ GetAutomationExecutionDetails.FailedStepNames }}\nFailureMessages: {{ GetAutomationExecutionDetails.FailedStepMessages }}\nAutomationFailureMessage: {{ GetAutomationExecutionDetails.AutomationFailureMessage }}",
+        "Message": "❌ ASG Patch Automation Failed.\nASG-Name: {{ GetASGName.ASGName }}\nExecutionId: {{ GetAutomationExecutionDetails.ExecutionId }}\nFailedSteps: {{ GetAutomationExecutionDetails.FailedStepNames }}\nFailureMessages: {{ GetAutomationExecutionDetails.FailedStepMessages }}",
         "Subject": "ASG Patch Failure"
       },
       "nextStep": "exit"
